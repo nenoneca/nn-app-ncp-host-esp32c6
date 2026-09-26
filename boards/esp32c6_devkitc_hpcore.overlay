@@ -1,0 +1,107 @@
+/*
+ * DTS overlay for ESP32-C6 NCP Host.
+ *
+ * Console + shell on USB-JTAG.
+ * UART1 carries the Spinel/HDLC link to the paired NCP chip at 460800
+ * with hardware flow control.
+ *
+ * Wiring (cross-connect to NCP; both sides use GPIO 20–23):
+ *   Host GPIO20 (UART1 TX)  -> NCP GPIO21 (UART1 RX)
+ *   Host GPIO21 (UART1 RX)  <- NCP GPIO20 (UART1 TX)
+ *   Host GPIO22 (UART1 RTS) -> NCP GPIO23 (UART1 CTS)
+ *   Host GPIO23 (UART1 CTS) <- NCP GPIO22 (UART1 RTS)
+ *   GND                     -- GND
+ *
+ * Pins were 4/5/6/7 originally; moved to 20–23 to bypass flaky USB
+ * behaviour observed on the GPIO 4–7 wiring during 2026-04-29 OTA
+ * bring-up.  Same UART1 peripheral, just different pinmux.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/esp-pinctrl-common.h>
+#include <zephyr/dt-bindings/pinctrl/esp32c6-pinctrl.h>
+#include <zephyr/dt-bindings/led/led.h>
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			pinmux = <UART1_TX_GPIO20>,
+				 <UART1_RTS_GPIO22>;
+			output-high;
+		};
+
+		group2 {
+			pinmux = <UART1_RX_GPIO21>,
+				 <UART1_CTS_GPIO23>;
+			bias-pull-up;
+		};
+	};
+
+	spim2_default: spim2_default {
+		group2 {
+			/* SPI2 MOSI on GPIO 8 — drives the on-board WS2812
+			 * RGB LED used for visual chip identification.
+			 * No CLK / CS — we send WS2812 frames as raw MOSI
+			 * bytes; SCK pin is left unmapped. */
+			pinmux = <SPIM2_MOSI_GPIO8>;
+		};
+	};
+};
+
+/ {
+	chosen {
+		/* Console + shell on UART0/CH343 — native USB-Serial-JTAG
+		 * endpoints have been unreliable on this dev kit; CH343
+		 * with DTR=1 is the dependable path. */
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		/* UART1 is driven directly by src/ncp_link.c — no Zephyr
+		 * OT/HDLC binding; we handle HDLC + Spinel ourselves. */
+	};
+
+	aliases {
+		ncp-uart = &uart1;
+	};
+};
+
+&usb_serial {
+	status = "okay";
+};
+
+&uart1 {
+	status = "okay";
+	current-speed = <460800>;
+	hw-flow-control;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-names = "default";
+};
+
+&spi2 {
+	status = "okay";
+	pinctrl-0 = <&spim2_default>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	/* WS2812 wants the data line to idle low between frames. */
+	line-idle-low;
+
+	led_strip: ws2812@0 {
+		compatible = "worldsemi,ws2812-spi";
+		reg = <0>;
+		spi-max-frequency = <6400000>;
+		chain-length = <1>;
+		spi-cpha;
+		/* 11110000: 625 ns high + 625 ns low (logic 1) */
+		spi-one-frame  = <0xf0>;
+		/* 11000000: 312.5 ns high + 937.5 ns low (logic 0) */
+		spi-zero-frame = <0xc0>;
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+	};
+};
+
+/ {
+	aliases {
+		led-strip = &led_strip;
+	};
+};

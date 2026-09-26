@@ -1,0 +1,140 @@
+mainmenu "ESP32-C6 NCP Host"
+
+# Pull in the nn_proto wire-format library + PSA Ed25519/SHA256 selectors.
+source "$(NN_MODULES_DIR)/libs/nn_proto/Kconfig"
+
+# fw_common — portable HDLC / Spinel / future shared logic.  Same module
+# is consumed by the Linux gateway daemon (host/gw_linux/) via its own
+# native CMake build.
+source "$(NN_MODULES_DIR)/libs/fw_common/Kconfig"
+
+# M6: PSA selectors for ECIES decrypt of BLE provisioning writes.
+# Uses X25519 (Montgomery curve) for encryption.  P-256 (SECP_R1_256)
+# stays for nn_proto signatures (deterministic ECDSA — see
+# nn_proto/Kconfig).  PSA_WANT_* are invisible at prj.conf level
+# (MBEDTLS_PROMPTLESS=y), so they must be selected from Kconfig.
+config GW_BLE_CRYPTO_DEPS
+	bool
+	default y
+	select PSA_WANT_ALG_ECDH
+	select PSA_WANT_ALG_HKDF
+	select PSA_WANT_ALG_GCM
+	select PSA_WANT_ALG_SHA_256
+	# X25519 (encryption)
+	select PSA_WANT_ECC_MONTGOMERY_255
+	# P-256 (signatures)
+	select PSA_WANT_ECC_SECP_R1_256
+	select PSA_WANT_KEY_TYPE_AES
+	select PSA_WANT_KEY_TYPE_DERIVE
+	select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_DERIVE
+	select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_IMPORT
+	select PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY
+
+source "Kconfig.zephyr"
+
+config NCP_NETIF_LOG_RX_OFFMESH
+	bool "Print every off-mesh STREAM_NET packet entering the host"
+	default n
+	help
+	  Diagnostic.  Logs proto/src-tail/dst-tail/UDP-ports for each
+	  off-mesh IPv6 packet arriving from the NCP via Spinel
+	  STREAM_NET.  Filters out MLE (port 19788) and anycast (61631)
+	  intra-mesh chatter.
+
+config NCP_LINK_LOG_UDP_FORWARD
+	bool "Print SPINEL_PROP_THREAD_UDP_FORWARD_STREAM events"
+	default n
+	help
+	  Diagnostic.  Logs both directions of UDP_FORWARD traffic
+	  (commissioner path).
+
+config BORDER_AGENT_LOG_RX
+	bool "Print every UDP packet arriving on the BA listener (49191)"
+	default n
+	help
+	  Diagnostic.  Used during external commissioner DTLS handshake
+	  troubleshooting.
+
+# ── nn_proto TCP broker ─────────────────────────────────────────────────────
+
+menu "nn_proto broker (hub TCP transport)"
+
+config NN_PROTO_HUB_HOSTNAME
+	string "Default hub mDNS hostname"
+	default "nn-hub.local"
+
+config NN_PROTO_HUB_PORT
+	int "Hub TCP port"
+	default 8767
+
+config NN_PROTO_HUB_FW_PORT
+	int "Hub HTTP port for OTA firmware downloads"
+	default 8770
+
+config NN_PROTO_RECONNECT_INITIAL_MS
+	int "Initial reconnect backoff (ms)"
+	default 2000
+
+config NN_PROTO_RECONNECT_MAX_MS
+	int "Maximum reconnect backoff (ms)"
+	default 60000
+
+config NN_PROTO_TX_RING_BYTES
+	int "Outbound frame ring-buffer size (bytes)"
+	default 8192
+
+config NN_PROTO_RX_BUF_BYTES
+	int "Inbound frame assembly buffer (bytes)"
+	default 4096
+
+config NN_PROTO_WORKER_STACK_SIZE
+	int "TCP worker thread stack size"
+	default 4096
+
+config NN_PROTO_UDP_PORT
+	int "UDP port for D2G/G2D on Thread mesh"
+	default 49190
+
+config NN_PROTO_ROUTER_TABLE_SIZE
+	int "Routing-table size (device_id → mesh-local IPv6)"
+	default 16
+
+config NN_PROTO_HELLO_INTERVAL_S
+	int "Gateway HELLO multicast interval (seconds)"
+	default 30
+
+endmenu
+
+# ── Bundle pairing ────────────────────────────────────────────────────────
+
+config NN_BUNDLED_NCP_VERSION
+	string "Expected NCP firmware version (bundle pairing)"
+	default "0.0.0"
+	help
+	  When non-default, the host's deferred-confirm worker queries
+	  the running NCP's CONFIG_NN_NCP_APP_VERSION via Spinel vendor
+	  property 0x3C03 and pushes the bundled NCP image (type
+	  "ncp_c6", version = this string) if they don't match — BEFORE
+	  calling boot_write_img_confirmed on itself.  This makes the
+	  host+NCP bundle atomic: if the NCP push fails, the host stays
+	  unconfirmed and the next reboot reverts the host too.
+
+	  Default "0.0.0" disables bundle pairing (the host self-confirms
+	  on uptime+TCP gates alone, and never auto-pushes to the NCP).
+
+config NN_BUNDLED_NCP_TYPE
+	string "Hub firmware target name for the paired NCP image"
+	default "ncp_c6"
+	help
+	  Used as the <device_type> argument to gwota_ncp / the auto
+	  reconciliation loop.  Must match what was uploaded via
+	  `nn-hub firmware upload <device_type> <version> <file>`.
+
+config NN_BUNDLE_RECONCILE_MAX_ATTEMPTS
+	int "Max NCP push attempts during bundle reconciliation"
+	default 3
+	help
+	  After this many consecutive failed pushes, the host stops
+	  retrying and stays unconfirmed.  The next reboot will revert
+	  the host to slot0, which keeps the bundle consistent with the
+	  old NCP.
